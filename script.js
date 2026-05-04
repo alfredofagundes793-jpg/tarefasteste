@@ -714,6 +714,19 @@ function renderOverviewScreen() {
     listDiv.className = 'card';
     listDiv.innerHTML = `<div class="card-title">${escapeHtml(list.name)}</div>`;
 
+    // Verificar se a lista não tem sublistas
+    if (list.sublists.length === 0) {
+      const notificationDiv = document.createElement('div');
+      notificationDiv.style.marginTop = 'var(--spacing-md)';
+      notificationDiv.innerHTML = `
+        <div style="background-color: var(--color-gray-light); border-left: 4px solid var(--color-warning); border-radius: var(--radius-md); padding: var(--spacing-md); margin-bottom: var(--spacing-md);">
+          <div style="font-weight: 500; margin-bottom: var(--spacing-sm); color: var(--color-black);">⚠️ Nenhuma sublista criada</div>
+          <div style="font-size: var(--font-size-caption); color: var(--color-gray-dark); margin-bottom: var(--spacing-md);">Para adicionar tarefas aqui, volte pro menu <strong>Config</strong> (⚙️) e adicione na lista uma sublista clicando em <strong>Gerenciar Sublistas</strong></div>
+        </div>
+      `;
+      listDiv.appendChild(notificationDiv);
+    }
+
     list.sublists.forEach(sublist => {
       const sublistDiv = document.createElement('div');
       sublistDiv.style.marginTop = 'var(--spacing-md)';
