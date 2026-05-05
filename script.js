@@ -1,5 +1,5 @@
 /* ============================================================================
-   TaskMaster PWA - Script Principal
+   TaskMaster PWA - Script Principal (CORRIGIDO)
    Gerenciamento de Listas, Sublistas, Tarefas, Kanbans, Calendário e Armazenamento Local
    ============================================================================ */
 
@@ -21,6 +21,16 @@ class TaskManager {
     if (stored) {
       try {
         this.lists = JSON.parse(stored);
+        // Inicializar campo 'order' para tarefas antigas que não o têm
+        this.lists.forEach(list => {
+          list.sublists.forEach(sublist => {
+            sublist.tasks.forEach((task, index) => {
+              if (!task.hasOwnProperty('order')) {
+                task.order = index;
+              }
+            });
+          });
+        });
       } catch (e) {
         console.error('Erro ao carregar dados:', e);
         this.lists = [];
@@ -119,9 +129,10 @@ class TaskManager {
         flagged: false,
         priority: 'low',
         dueDate: null,
-        dueTime: null, // Novo campo de horário
+        dueTime: null,
         note: '',
-        status: 'todo', // 'todo', 'in-progress', 'done'
+        status: 'todo',
+        order: sublist.tasks.length, // NOVO: campo de ordem
         createdAt: new Date().toISOString()
       };
       sublist.tasks.push(task);
@@ -165,58 +176,54 @@ class TaskManager {
     }
   }
 
-  // Reordenar tarefa dentro da mesma faixa de prioridade
+  // CORRIGIDO: Reordenar tarefa APENAS dentro da mesma prioridade
   reorderTask(listId, sublistId, taskId, newIndex) {
     const sublist = this.getSublist(listId, sublistId);
     if (!sublist) return;
 
-    const taskIndex = sublist.tasks.findIndex(t => t.id === taskId);
-    if (taskIndex === -1) return;
+    const task = this.getTask(listId, sublistId, taskId);
+    if (!task) return;
 
-    const task = sublist.tasks[taskIndex];
+    // Obter todas as tarefas ordenadas
     const sortedTasks = this.sortTasks(sublist.tasks);
-    const taskPositionInSorted = sortedTasks.findIndex(t => t.id === taskId);
-
-    // Encontrar os limites da faixa de prioridade
+    
+    // Encontrar o grupo de prioridade da tarefa sendo movida
     const getPriorityGroup = (t) => {
       if (t.flagged) return 'flagged';
       return t.priority;
     };
 
     const taskGroup = getPriorityGroup(task);
-    let groupStart = 0;
-    let groupEnd = sortedTasks.length;
-
+    
+    // Encontrar os índices de início e fim do grupo de prioridade
+    let groupStart = -1;
+    let groupEnd = -1;
+    
     for (let i = 0; i < sortedTasks.length; i++) {
       if (getPriorityGroup(sortedTasks[i]) === taskGroup) {
-        if (groupStart === 0 && i > 0) groupStart = i;
-        groupEnd = i + 1;
-      } else if (groupStart > 0) {
-        break;
+        if (groupStart === -1) groupStart = i;
+        groupEnd = i;
       }
     }
 
-    // Limitar o novo índice aos limites do grupo
-    const constrainedIndex = Math.max(groupStart, Math.min(newIndex, groupEnd - 1));
-
-    // Remover a tarefa da posição atual
-    sublist.tasks.splice(taskIndex, 1);
-
-    // Encontrar a posição correta na lista original
-    const newSortedTasks = this.sortTasks(sublist.tasks);
-    const targetTaskInSorted = newSortedTasks[constrainedIndex];
-
-    if (targetTaskInSorted) {
-      const targetIndexInOriginal = sublist.tasks.findIndex(t => t.id === targetTaskInSorted.id);
-      sublist.tasks.splice(targetIndexInOriginal, 0, task);
-    } else {
-      sublist.tasks.push(task);
+    // Se o novo índice está fora do grupo, não permitir
+    if (newIndex < groupStart || newIndex > groupEnd) {
+      console.warn('❌ Não é permitido mover tarefa para fora do seu grupo de prioridade');
+      return;
     }
+
+    // Recalcular a ordem das tarefas do grupo
+    const groupTasks = sortedTasks.slice(groupStart, groupEnd + 1);
+    
+    // Atualizar o campo 'order' de todas as tarefas do grupo
+    groupTasks.forEach((t, index) => {
+      t.order = groupStart + index;
+    });
 
     this.saveToStorage();
   }
 
-  // Obter todas as tarefas ordenadas por prioridade e flag (Apenas ativas)
+  // Obter todas as tarefas ordenadas por prioridade, flag e ordem manual
   getAllActiveTasksSorted() {
     const allTasks = [];
     this.lists.forEach(list => {
@@ -259,7 +266,7 @@ class TaskManager {
     return completedTasks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
-  // Obter tarefas por sublista ordenadas (Apenas ativas)
+  // Obter tarefas por sublista ordenadas
   getSublistTasksSorted(listId, sublistId) {
     const sublist = this.getSublist(listId, sublistId);
     if (!sublist) return [];
@@ -268,48 +275,36 @@ class TaskManager {
     return this.sortTasks(tasks);
   }
 
-  // Utilitário de ordenação
+  // CORRIGIDO: Utilitário de ordenação - respeita 'order' dentro do mesmo grupo de prioridade
   sortTasks(tasks) {
     return [...tasks].sort((a, b) => {
+      // Primeiro, ordenar por flag
       if (a.flagged !== b.flagged) return b.flagged - a.flagged;
+      
+      // Depois, ordenar por prioridade
       const priorityOrder = { high: 0, medium: 1, low: 2 };
       if (priorityOrder[a.priority] !== priorityOrder[b.priority]) {
         return priorityOrder[a.priority] - priorityOrder[b.priority];
       }
+      
+      // Dentro do mesmo grupo de prioridade, usar o campo 'order'
+      if (a.order !== undefined && b.order !== undefined) {
+        return a.order - b.order;
+      }
+      
+      // Fallback: ordenar por data de criação
       return new Date(a.createdAt) - new Date(b.createdAt);
     });
   }
 
-  // Obter tarefas por status (para Kanban 2)
-  getTasksByStatus(status) {
-    const allTasks = [];
-    this.lists.forEach(list => {
-      list.sublists.forEach(sublist => {
-        sublist.tasks.forEach(task => {
-          if (task.status === status) {
-            allTasks.push({
-              ...task,
-              listId: list.id,
-              listName: list.name,
-              sublistId: sublist.id,
-              sublistName: sublist.name
-            });
-          }
-        });
-      });
-    });
-
-    return this.sortTasks(allTasks);
-  }
-
-  // Obter tarefas de um dia específico para o calendário
+  // Obter tarefas por data
   getTasksByDate(dateStr) {
-    const allTasks = [];
+    const tasks = [];
     this.lists.forEach(list => {
       list.sublists.forEach(sublist => {
         sublist.tasks.forEach(task => {
           if (task.dueDate === dateStr && task.status !== 'done' && !task.completed) {
-            allTasks.push({
+            tasks.push({
               ...task,
               listId: list.id,
               listName: list.name,
@@ -320,134 +315,7 @@ class TaskManager {
         });
       });
     });
-    return allTasks;
-  }
-}
-
-// ============================================================================
-// Drag and Drop System - VERSÃO SIMPLIFICADA
-// ============================================================================
-
-function setupSimpleDragAndDrop() {
-  let draggedElement = null;
-  let draggedTaskData = null;
-  
-  document.addEventListener('dragstart', function(e) {
-    const taskItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
-    if (!taskItem) return;
-    
-    draggedElement = taskItem;
-    draggedTaskData = {
-      taskId: taskItem.dataset.taskId,
-      listId: taskItem.dataset.listId,
-      sublistId: taskItem.dataset.sublistId
-    };
-    
-    taskItem.style.opacity = '0.5';
-    taskItem.style.backgroundColor = '#f0f0f0';
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/html', taskItem.innerHTML);
-  }, true);
-  
-  document.addEventListener('dragover', function(e) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    
-    const taskItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
-    if (!taskItem || taskItem === draggedElement) return;
-    
-    const rect = taskItem.getBoundingClientRect();
-    const midpoint = rect.top + rect.height / 2;
-    
-    taskItem.style.borderTop = e.clientY < midpoint ? '3px solid #FF6B35' : 'none';
-    taskItem.style.borderBottom = e.clientY >= midpoint ? '3px solid #FF6B35' : 'none';
-  }, true);
-  
-  document.addEventListener('drop', function(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    const targetItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
-    if (!targetItem || !draggedElement || targetItem === draggedElement) return;
-    
-    if (draggedTaskData.listId === targetItem.dataset.listId && 
-        draggedTaskData.sublistId === targetItem.dataset.sublistId) {
-      
-      const parent = draggedElement.parentNode;
-      const targetParent = targetItem.parentNode;
-      
-      if (parent === targetParent) {
-        const rect = targetItem.getBoundingClientRect();
-        const midpoint = rect.top + rect.height / 2;
-        
-        if (e.clientY < midpoint) {
-          targetItem.parentNode.insertBefore(draggedElement, targetItem);
-        } else {
-          targetItem.parentNode.insertBefore(draggedElement, targetItem.nextSibling);
-        }
-        
-        const sublist = taskManager.getSublist(draggedTaskData.listId, draggedTaskData.sublistId);
-        if (sublist) {
-          const sortedTasks = taskManager.sortTasks(sublist.tasks);
-          const targetIndex = sortedTasks.findIndex(t => t.id === targetItem.dataset.taskId);
-          
-          if (targetIndex !== -1) {
-            taskManager.reorderTask(draggedTaskData.listId, draggedTaskData.sublistId, draggedTaskData.taskId, targetIndex);
-          }
-        }
-      }
-    }
-    
-    document.querySelectorAll('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item').forEach(item => {
-      item.style.borderTop = 'none';
-      item.style.borderBottom = 'none';
-    });
-  }, true);
-  
-  document.addEventListener('dragend', function(e) {
-    if (draggedElement) {
-      draggedElement.style.opacity = '1';
-      draggedElement.style.backgroundColor = '';
-    }
-    
-    document.querySelectorAll('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item').forEach(item => {
-      item.style.borderTop = 'none';
-      item.style.borderBottom = 'none';
-    });
-    
-    draggedElement = null;
-    draggedTaskData = null;
-  }, true);
-}
-
-// ============================================================================
-// Inicialização Global
-// ============================================================================
-
-const taskManager = new TaskManager();
-let currentScreen = 'overview';
-
-// ============================================================================
-// Funções de Navegação
-// ============================================================================
-
-function showScreen(screenName) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const screen = document.getElementById(`${screenName}-screen`);
-  if (screen) {
-    screen.classList.add('active');
-    currentScreen = screenName;
-    updateNavigation();
-  }
-}
-
-function updateNavigation() {
-  document.querySelectorAll('.nav-button').forEach(btn => {
-    btn.classList.remove('active');
-  });
-  const activeBtn = document.querySelector(`[data-screen="${currentScreen}"]`);
-  if (activeBtn) {
-    activeBtn.classList.add('active');
+    return this.sortTasks(tasks);
   }
 }
 
@@ -865,7 +733,6 @@ function renderOverviewScreen() {
     listDiv.className = 'card';
     listDiv.innerHTML = `<div class="card-title">${escapeHtml(list.name)}</div>`;
 
-    // Verificar se a lista não tem sublistas
     if (list.sublists.length === 0) {
       const notificationDiv = document.createElement('div');
       notificationDiv.style.marginTop = 'var(--spacing-md)';
@@ -889,45 +756,21 @@ function renderOverviewScreen() {
 
       const tasks = taskManager.getSublistTasksSorted(list.id, sublist.id);
       if (tasks.length === 0) {
-        sublistDiv.innerHTML += '<div class="text-muted" style="font-size: var(--font-size-caption);">Sem tarefas ativas</div>';
+        sublistDiv.innerHTML += '<div style="font-size: var(--font-size-caption); color: var(--color-gray-dark);">Sem tarefas ativas</div>';
       } else {
-        tasks.forEach(task => {
-          const taskDiv = document.createElement('div');
-          taskDiv.className = 'task-item';
-          taskDiv.style.marginBottom = 'var(--spacing-sm)';
-          taskDiv.style.cursor = 'pointer';
-          
-          let metaHtml = '';
-          if (task.flagged) {
-            metaHtml += '<span class="task-flagged">🚩</span>';
-          }
-          if (task.priority !== 'low') {
-            const priorityLabel = task.priority === 'high' ? '🔴' : '🟡';
-            metaHtml += `<span>${priorityLabel}</span>`;
-          }
-          if (task.note) {
-            metaHtml += `<span class="task-note-icon" onclick="event.stopPropagation(); showTaskNote('${task.id}', '${list.id}', '${sublist.id}')">📝</span>`;
-          }
-
-          taskDiv.innerHTML = `
-            <div class="task-checkbox ${task.completed ? 'checked' : ''}" onclick="event.stopPropagation(); toggleTaskComplete('${list.id}', '${sublist.id}', '${task.id}')">
-              ${task.completed ? '✓' : ''}
-            </div>
-            <div class="task-content" onclick="editTask('${list.id}', '${sublist.id}', '${task.id}')">
-              <div class="task-title">${escapeHtml(task.title)}</div>
-              <div class="task-meta">${metaHtml}</div>
-            </div>
-          `;
-          sublistDiv.appendChild(taskDiv);
+        tasks.slice(0, 3).forEach(task => {
+          const taskEl = createTaskElement(task, list.id, sublist.id);
+          sublistDiv.appendChild(taskEl);
         });
+        if (tasks.length > 3) {
+          const moreDiv = document.createElement('div');
+          moreDiv.style.marginTop = 'var(--spacing-sm)';
+          moreDiv.style.fontSize = 'var(--font-size-caption)';
+          moreDiv.style.color = 'var(--color-gray-dark)';
+          moreDiv.textContent = `+${tasks.length - 3} mais`;
+          sublistDiv.appendChild(moreDiv);
+        }
       }
-
-      const addBtn = document.createElement('button');
-      addBtn.className = 'btn-primary btn-small';
-      addBtn.style.marginTop = 'var(--spacing-sm)';
-      addBtn.textContent = '+ Adicionar';
-      addBtn.onclick = () => showCreateTaskModal(list.id, sublist.id);
-      sublistDiv.appendChild(addBtn);
 
       listDiv.appendChild(sublistDiv);
     });
@@ -948,8 +791,8 @@ function renderKanban1Screen() {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-state-icon">📊</div>
-        <div class="empty-state-title">Sem sublistas</div>
-        <div class="empty-state-text">Crie sublistas para visualizar no Kanban</div>
+        <div class="empty-state-title">Sem listas</div>
+        <div class="empty-state-text">Crie uma lista primeiro</div>
       </div>
     `;
     return;
@@ -962,36 +805,35 @@ function renderKanban1Screen() {
     list.sublists.forEach(sublist => {
       const column = document.createElement('div');
       column.className = 'kanban-column';
-
-      const header = document.createElement('div');
-      header.className = 'kanban-column-header';
-      header.innerHTML = `
-        ${escapeHtml(sublist.name)}
-        <span class="kanban-column-count">(${sublist.tasks.filter(t => !t.completed).length})</span>
+      column.innerHTML = `
+        <div class="kanban-column-header">
+          ${escapeHtml(sublist.name)}
+          <div class="kanban-column-count">${sublist.tasks.filter(t => t.status !== 'done').length}</div>
+        </div>
       `;
-      column.appendChild(header);
 
       const tasks = taskManager.getSublistTasksSorted(list.id, sublist.id);
-      tasks.forEach(task => {
-        const card = document.createElement('div');
-        card.className = 'kanban-card';
-        card.draggable = true;
-        card.dataset.taskId = task.id;
-        card.dataset.listId = list.id;
-        card.dataset.sublistId = sublist.id;
-        card.innerHTML = `
-          <div style="font-weight: 500; margin-bottom: 4px;">${escapeHtml(task.title)}</div>
-          <div style="font-size: var(--font-size-caption); color: var(--color-gray-dark); margin-bottom: 8px;">
-            ${escapeHtml(list.name)}
-          </div>
-          <div style="display: flex; gap: 4px; flex-wrap: wrap;">
-            ${task.flagged ? '<span class="badge badge-flagged">🚩 Sinalizada</span>' : ''}
-            ${task.priority !== 'low' ? `<span class="badge task-priority ${task.priority}">${task.priority === 'high' ? 'Alta' : 'Média'}</span>` : ''}
-          </div>
-        `;
-        card.onclick = () => editTask(list.id, sublist.id, task.id);
-        column.appendChild(card);
-      });
+      if (tasks.length === 0) {
+        column.innerHTML += '<div style="text-align: center; color: var(--color-gray-dark); font-size: var(--font-size-caption);">Sem tarefas</div>';
+      } else {
+        tasks.forEach(task => {
+          const card = document.createElement('div');
+          card.className = 'kanban-card';
+          card.draggable = true;
+          card.dataset.taskId = task.id;
+          card.dataset.listId = list.id;
+          card.dataset.sublistId = sublist.id;
+          card.innerHTML = `
+            <div style="font-weight: 500; margin-bottom: 4px;">${escapeHtml(task.title)}</div>
+            <div style="font-size: 11px; color: var(--color-gray-dark);">
+              ${task.priority === 'high' ? '🔴 Alta' : task.priority === 'medium' ? '🟡 Média' : '🔵 Baixa'}
+              ${task.flagged ? ' • 🚩' : ''}
+            </div>
+          `;
+          card.onclick = () => editTask(list.id, sublist.id, task.id);
+          column.appendChild(card);
+        });
+      }
 
       kanbanContainer.appendChild(column);
     });
@@ -1009,7 +851,7 @@ function renderKanban2Screen() {
   container.innerHTML = '';
 
   const statuses = ['todo', 'in-progress', 'done'];
-  const statusLabels = { 'todo': 'A Fazer', 'in-progress': 'Em Andamento', 'done': 'Concluída' };
+  const statusLabels = { 'todo': 'A Fazer', 'in-progress': 'Em Progresso', 'done': 'Concluído' };
 
   const kanbanContainer = document.createElement('div');
   kanbanContainer.className = 'kanban-container';
@@ -1018,35 +860,54 @@ function renderKanban2Screen() {
     const column = document.createElement('div');
     column.className = 'kanban-column';
 
-    const header = document.createElement('div');
-    header.className = 'kanban-column-header';
-    const tasks = taskManager.getTasksByStatus(status);
-    header.innerHTML = `
-      ${statusLabels[status]}
-      <span class="kanban-column-count">(${tasks.length})</span>
-    `;
-    column.appendChild(header);
-
-    tasks.forEach(task => {
-      const card = document.createElement('div');
-      card.className = 'kanban-card';
-      card.draggable = true;
-      card.dataset.taskId = task.id;
-      card.dataset.listId = task.listId;
-      card.dataset.sublistId = task.sublistId;
-      card.innerHTML = `
-        <div style="font-weight: 500; margin-bottom: 4px;">${escapeHtml(task.title)}</div>
-        <div style="font-size: var(--font-size-caption); color: var(--color-gray-dark); margin-bottom: 8px;">
-          ${escapeHtml(task.listName)} • ${escapeHtml(task.sublistName)}
-        </div>
-        <div style="display: flex; gap: 4px; flex-wrap: wrap;">
-          ${task.flagged ? '<span class="badge badge-flagged">🚩 Sinalizada</span>' : ''}
-          ${task.priority !== 'low' ? `<span class="badge task-priority ${task.priority}">${task.priority === 'high' ? 'Alta' : 'Média'}</span>` : ''}
-        </div>
-      `;
-      card.onclick = () => editTask(task.listId, task.sublistId, task.id);
-      column.appendChild(card);
+    const tasks = [];
+    taskManager.lists.forEach(list => {
+      list.sublists.forEach(sublist => {
+        sublist.tasks.forEach(task => {
+          if (task.status === status) {
+            tasks.push({
+              ...task,
+              listId: list.id,
+              listName: list.name,
+              sublistId: sublist.id,
+              sublistName: sublist.name
+            });
+          }
+        });
+      });
     });
+
+    column.innerHTML = `
+      <div class="kanban-column-header">
+        ${statusLabels[status]}
+        <div class="kanban-column-count">${tasks.length}</div>
+      </div>
+    `;
+
+    if (tasks.length === 0) {
+      column.innerHTML += '<div style="text-align: center; color: var(--color-gray-dark); font-size: var(--font-size-caption);">Sem tarefas</div>';
+    } else {
+      tasks.forEach(task => {
+        const card = document.createElement('div');
+        card.className = 'kanban-card';
+        card.draggable = true;
+        card.dataset.taskId = task.id;
+        card.dataset.listId = task.listId;
+        card.dataset.sublistId = task.sublistId;
+        card.innerHTML = `
+          <div style="font-weight: 500; margin-bottom: 4px;">${escapeHtml(task.title)}</div>
+          <div style="font-size: 10px; color: var(--color-gray-dark); margin-bottom: 4px;">
+            ${task.listName} • ${task.sublistName}
+          </div>
+          <div style="font-size: 11px;">
+            ${task.priority === 'high' ? '🔴 Alta' : task.priority === 'medium' ? '🟡 Média' : '🔵 Baixa'}
+            ${task.flagged ? ' • 🚩' : ''}
+          </div>
+        `;
+        card.onclick = () => editTask(task.listId, task.sublistId, task.id);
+        column.appendChild(card);
+      });
+    }
 
     kanbanContainer.appendChild(column);
   });
@@ -1055,35 +916,28 @@ function renderKanban2Screen() {
 }
 
 // ============================================================================
-// Tela 5: Caderno (Todas as Tarefas Ativas)
+// Tela 5: Caderno (Todas as Tarefas)
 // ============================================================================
 
 function renderNotebookScreen() {
   const container = document.getElementById('notebook-content');
   container.innerHTML = '';
 
-  const allTasks = taskManager.getAllActiveTasksSorted();
+  const tasks = taskManager.getAllActiveTasksSorted();
 
-  if (allTasks.length === 0) {
+  if (tasks.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-state-icon">📔</div>
-        <div class="empty-state-title">Nenhuma tarefa ativa</div>
-        <div class="empty-state-text">Crie tarefas para visualizá-las aqui</div>
+        <div class="empty-state-title">Sem tarefas ativas</div>
+        <div class="empty-state-text">Você está em dia!</div>
       </div>
     `;
     return;
   }
 
-  allTasks.forEach(task => {
+  tasks.forEach(task => {
     const taskEl = createTaskElement(task, task.listId, task.sublistId);
-    // Adicionar nome da lista/sublista na meta
-    const meta = taskEl.querySelector('.task-meta');
-    const info = document.createElement('span');
-    info.className = 'text-small';
-    info.textContent = `${task.listName} • ${task.sublistName}`;
-    meta.appendChild(info);
-    
     container.appendChild(taskEl);
   });
 }
@@ -1096,49 +950,32 @@ function renderCompletedScreen() {
   const container = document.getElementById('completed-content');
   container.innerHTML = '';
 
-  const completedTasks = taskManager.getAllCompletedTasks();
+  const tasks = taskManager.getAllCompletedTasks();
 
-  if (completedTasks.length === 0) {
+  if (tasks.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-state-icon">✅</div>
         <div class="empty-state-title">Nenhuma tarefa concluída</div>
-        <div class="empty-state-text">As tarefas que você concluir aparecerão aqui</div>
+        <div class="empty-state-text">Conclua tarefas para vê-las aqui</div>
       </div>
     `;
     return;
   }
 
-  completedTasks.forEach(task => {
-    const taskEl = document.createElement('div');
-    taskEl.className = 'task-item completed';
-    
-    taskEl.innerHTML = `
-      <div class="task-checkbox checked" onclick="toggleTaskComplete('${task.listId}', '${task.sublistId}', '${task.id}')">
-        ✓
-      </div>
-      <div class="task-content">
-        <div class="task-title">${escapeHtml(task.title)}</div>
-        <div class="task-meta">
-          <span class="text-small">${task.listName} • ${task.sublistName}</span>
-        </div>
-      </div>
-      <div class="task-actions">
-        <button class="btn-icon" onclick="deleteTask('${task.listId}', '${task.sublistId}', '${task.id}')">🗑️</button>
-      </div>
-    `;
+  tasks.forEach(task => {
+    const taskEl = createTaskElement(task, task.listId, task.sublistId);
     container.appendChild(taskEl);
   });
 }
 
 // ============================================================================
-// Tela 7: Calendário (Nova)
+// Tela 7: Calendário
 // ============================================================================
 
 function renderCalendarScreen() {
   const container = document.getElementById('calendar-content');
   
-  // Renderizar as três visualizações
   renderCalendarToday();
   renderCalendarWeek();
   renderCalendarMonth();
@@ -1162,11 +999,9 @@ function renderCalendarToday() {
     return;
   }
 
-  // Separar tarefas com e sem horário
   const noTimeTask = tasks.filter(t => !t.dueTime);
   const withTimeTasks = tasks.filter(t => t.dueTime).sort((a, b) => a.dueTime.localeCompare(b.dueTime));
 
-  // Renderizar tarefas sem horário
   if (noTimeTask.length > 0) {
     const noTimeSection = document.createElement('div');
     noTimeSection.className = 'calendar-no-time-section';
@@ -1180,7 +1015,6 @@ function renderCalendarToday() {
     container.appendChild(noTimeSection);
   }
 
-  // Renderizar tarefas com horário
   const timeline = document.createElement('div');
   timeline.className = 'calendar-timeline';
 
@@ -1277,17 +1111,13 @@ function renderCalendarMonth() {
   const year = today.getFullYear();
   const month = today.getMonth();
 
-  // Primeiro dia do mês
   const firstDay = new Date(year, month, 1);
-  // Último dia do mês
   const lastDay = new Date(year, month + 1, 0);
-  // Dia da semana do primeiro dia (0 = domingo)
   const startDayOfWeek = firstDay.getDay();
 
   const monthContainer = document.createElement('div');
   monthContainer.className = 'calendar-month-container';
 
-  // Adicionar dias do mês anterior
   const prevMonthLastDay = new Date(year, month, 0).getDate();
   for (let i = startDayOfWeek - 1; i >= 0; i--) {
     const dayNum = prevMonthLastDay - i;
@@ -1297,7 +1127,6 @@ function renderCalendarMonth() {
     monthContainer.appendChild(dayEl);
   }
 
-  // Adicionar dias do mês atual
   for (let day = 1; day <= lastDay.getDate(); day++) {
     const date = new Date(year, month, day);
     const dateStr = date.toLocaleDateString('en-CA');
@@ -1336,9 +1165,8 @@ function renderCalendarMonth() {
     monthContainer.appendChild(dayEl);
   }
 
-  // Adicionar dias do próximo mês
   const totalCells = monthContainer.children.length;
-  const remainingCells = 42 - totalCells; // 6 linhas x 7 dias
+  const remainingCells = 42 - totalCells;
   for (let i = 1; i <= remainingCells; i++) {
     const dayEl = document.createElement('div');
     dayEl.className = 'calendar-month-day other-month';
@@ -1400,11 +1228,169 @@ function goBack() {
 }
 
 // ============================================================================
+// CORRIGIDO: Drag and Drop com Validação de Prioridade
+// ============================================================================
+
+function setupSimpleDragAndDrop() {
+  let draggedElement = null;
+  let draggedTaskData = null;
+  let draggedTaskPriority = null;
+  let draggedTaskFlagged = null;
+  
+  document.addEventListener('dragstart', function(e) {
+    const taskItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
+    if (!taskItem) return;
+    
+    draggedElement = taskItem;
+    draggedTaskData = {
+      taskId: taskItem.dataset.taskId,
+      listId: taskItem.dataset.listId,
+      sublistId: taskItem.dataset.sublistId
+    };
+    
+    // Obter prioridade e flag da tarefa sendo arrastada
+    const task = taskManager.getTask(draggedTaskData.listId, draggedTaskData.sublistId, draggedTaskData.taskId);
+    if (task) {
+      draggedTaskPriority = task.priority;
+      draggedTaskFlagged = task.flagged;
+    }
+    
+    taskItem.style.opacity = '0.5';
+    taskItem.style.backgroundColor = '#f0f0f0';
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/html', taskItem.innerHTML);
+  }, true);
+  
+  document.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    
+    const taskItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
+    if (!taskItem || taskItem === draggedElement) return;
+    
+    // CORRIGIDO: Validar se a prioridade é igual
+    const targetTask = taskManager.getTask(taskItem.dataset.listId, taskItem.dataset.sublistId, taskItem.dataset.taskId);
+    if (targetTask && (targetTask.priority !== draggedTaskPriority || targetTask.flagged !== draggedTaskFlagged)) {
+      e.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    
+    const rect = taskItem.getBoundingClientRect();
+    const midpoint = rect.top + rect.height / 2;
+    
+    taskItem.style.borderTop = e.clientY < midpoint ? '3px solid #FF6B35' : 'none';
+    taskItem.style.borderBottom = e.clientY >= midpoint ? '3px solid #FF6B35' : 'none';
+  }, true);
+  
+  document.addEventListener('drop', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const targetItem = e.target.closest('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item');
+    if (!targetItem || !draggedElement || targetItem === draggedElement) return;
+    
+    // CORRIGIDO: Validar se está na mesma sublista E mesma prioridade
+    if (draggedTaskData.listId === targetItem.dataset.listId && 
+        draggedTaskData.sublistId === targetItem.dataset.sublistId) {
+      
+      const targetTask = taskManager.getTask(targetItem.dataset.listId, targetItem.dataset.sublistId, targetItem.dataset.taskId);
+      
+      // Verificar se as prioridades são iguais
+      if (targetTask && (targetTask.priority !== draggedTaskPriority || targetTask.flagged !== draggedTaskFlagged)) {
+        console.warn('❌ Não é permitido mover tarefas entre diferentes prioridades!');
+        document.querySelectorAll('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item').forEach(item => {
+          item.style.borderTop = 'none';
+          item.style.borderBottom = 'none';
+        });
+        return;
+      }
+      
+      const parent = draggedElement.parentNode;
+      const targetParent = targetItem.parentNode;
+      
+      if (parent === targetParent) {
+        const rect = targetItem.getBoundingClientRect();
+        const midpoint = rect.top + rect.height / 2;
+        
+        if (e.clientY < midpoint) {
+          targetItem.parentNode.insertBefore(draggedElement, targetItem);
+        } else {
+          targetItem.parentNode.insertBefore(draggedElement, targetItem.nextSibling);
+        }
+        
+        const sublist = taskManager.getSublist(draggedTaskData.listId, draggedTaskData.sublistId);
+        if (sublist) {
+          const sortedTasks = taskManager.sortTasks(sublist.tasks);
+          const targetIndex = sortedTasks.findIndex(t => t.id === targetItem.dataset.taskId);
+          
+          if (targetIndex !== -1) {
+            taskManager.reorderTask(draggedTaskData.listId, draggedTaskData.sublistId, draggedTaskData.taskId, targetIndex);
+            console.log('✅ Tarefa reordenada com sucesso!');
+          }
+        }
+      }
+    }
+    
+    document.querySelectorAll('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item').forEach(item => {
+      item.style.borderTop = 'none';
+      item.style.borderBottom = 'none';
+    });
+  }, true);
+  
+  document.addEventListener('dragend', function(e) {
+    if (draggedElement) {
+      draggedElement.style.opacity = '1';
+      draggedElement.style.backgroundColor = '';
+    }
+    
+    document.querySelectorAll('.task-item, .kanban-card, .calendar-task-item, .calendar-week-task-item').forEach(item => {
+      item.style.borderTop = 'none';
+      item.style.borderBottom = 'none';
+    });
+    
+    draggedElement = null;
+    draggedTaskData = null;
+    draggedTaskPriority = null;
+    draggedTaskFlagged = null;
+  }, true);
+}
+
+// ============================================================================
+// Inicialização Global
+// ============================================================================
+
+const taskManager = new TaskManager();
+let currentScreen = 'overview';
+
+// ============================================================================
+// Funções de Navegação
+// ============================================================================
+
+function showScreen(screenName) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const screen = document.getElementById(`${screenName}-screen`);
+  if (screen) {
+    screen.classList.add('active');
+    currentScreen = screenName;
+    updateNavigation();
+  }
+}
+
+function updateNavigation() {
+  document.querySelectorAll('.nav-button').forEach(btn => {
+    btn.classList.remove('active');
+  });
+  const activeBtn = document.querySelector(`[data-screen="${currentScreen}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add('active');
+  }
+}
+
+// ============================================================================
 // Inicialização
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Configurar event listeners dos botões de navegação
   document.querySelectorAll('.nav-button').forEach(btn => {
     btn.addEventListener('click', () => {
       const screen = btn.dataset.screen;
@@ -1419,14 +1405,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Configurar event listeners das abas do calendário
   document.querySelectorAll('.calendar-tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      // Remover active de todos os botões e views
       document.querySelectorAll('.calendar-tab-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.calendar-view').forEach(v => v.classList.remove('active'));
       
-      // Adicionar active ao botão clicado e sua view correspondente
       btn.classList.add('active');
       const tabName = btn.dataset.tab;
       const viewId = `calendar-${tabName}`;
@@ -1434,7 +1417,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Configurar event listeners dos modais
   document.getElementById('list-modal-overlay').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeListModal();
   });
@@ -1445,12 +1427,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === e.currentTarget) closeTaskModal();
   });
 
-  // Botões de salvar
   document.getElementById('list-save-btn').addEventListener('click', saveList);
   document.getElementById('sublist-save-btn').addEventListener('click', saveSublist);
   document.getElementById('task-save-btn').addEventListener('click', saveTask);
 
-  // Botões de fechar
   document.getElementById('list-close-btn').addEventListener('click', closeListModal);
   document.getElementById('list-close-btn-footer').addEventListener('click', closeListModal);
   document.getElementById('sublist-close-btn').addEventListener('click', closeSublistModal);
@@ -1458,15 +1438,12 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('task-close-btn').addEventListener('click', closeTaskModal);
   document.getElementById('task-close-btn-footer').addEventListener('click', closeTaskModal);
 
-  // Botões de voltar
   document.getElementById('back-btn').addEventListener('click', goBack);
   document.getElementById('back-btn-sublist').addEventListener('click', goBack);
 
-  // Inicializar drag and drop - VERSÃO SIMPLIFICADA
   setupSimpleDragAndDrop();
-  console.log('✅ Drag-and-drop inicializado!');
+  console.log('✅ Drag-and-drop inicializado com validação de prioridade!');
 
-  // Mostrar tela inicial
   showScreen('overview');
   renderOverviewScreen();
 });
